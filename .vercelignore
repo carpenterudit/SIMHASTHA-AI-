@@ -1,0 +1,9 @@
+backend/
+docs/
+*.pt
+*.onnx
+*.weights
+*.mp4
+*.avi
+*.mov
+*.mkv
