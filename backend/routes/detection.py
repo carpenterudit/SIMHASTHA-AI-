@@ -69,4 +69,37 @@ async def detection_results(job_id: str):
     job = processor.get(job_id)
     if not job:
         raise HTTPException(404, "Detection job not found.")
-    return {"job_id": job.id, "status": job.status, "model": job.model_name, "device": job.device, "frames": job.results, "processed_video_url": job.processed_video_url}
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "model": job.model_name,
+        "device": job.device,
+        "current_count": job.current_count,
+        "active_track_count": job.active_track_count,
+        "unique_track_count": job.unique_track_count,
+        "peak_crowd": job.peak_crowd,
+        "density_index": job.density_index,
+        "visual_density_index": job.visual_density_index,
+        "yolo_density": job.yolo_density,
+        "smoothed_density": job.smoothed_density,
+        "occupancy_ratio": job.occupancy_ratio,
+        "crowd_status": job.crowd_status,
+        "flow_direction": job.flow_direction,
+        "flow_speed": job.flow_speed,
+        "flow_speed_unit": job.flow_speed_unit,
+        "congestion_index": job.congestion_index,
+        "congestion_status": job.congestion_status,
+        "active_flow_vectors": job.active_flow_vectors,
+        "anomaly_score": job.anomaly_score,
+        "anomaly_status": job.anomaly_status,
+        "anomaly_reason": job.anomaly_reason,
+        "stagnation_anomaly": job.stagnation_anomaly,
+        "density_surge_anomaly": job.density_surge_anomaly,
+        "deceleration_anomaly": job.deceleration_anomaly,
+        "reversal_anomaly": job.reversal_anomaly,
+        "turbulence_anomaly": job.turbulence_anomaly,
+        "reference_zone": job.reference_zone,
+        "frames": job.results,
+        "processed_video_url": job.processed_video_url,
+    }
+

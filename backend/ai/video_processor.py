@@ -1,3 +1,4 @@
+from collections import deque
 import json
 import logging
 import threading
@@ -10,12 +11,21 @@ import cv2
 
 from ai.detector import PersonDetector
 from config import (
+    ANOMALY_LEVEL_NORMAL,
+    ANOMALY_ROLLING_WINDOW_FRAMES,
+    DEFAULT_CAMERA_ZONE,
     DEFAULT_CONFIDENCE,
     DEFAULT_FRAME_SKIP,
     DEFAULT_INPUT_SIZE,
     DEFAULT_MODEL,
+    FLOW_SPEED_UNIT,
     PROCESSED_DIR,
     RESULTS_DIR,
+)
+from services.crowd_service import (
+    calculate_crowd_anomalies,
+    calculate_crowd_flow_and_congestion,
+    calculate_frame_density,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,6 +45,29 @@ class Job:
     total_frames: int = 0
     current_count: int = 0
     active_track_count: int = 0
+    unique_track_count: int = 0
+    peak_crowd: int = 0
+    density_index: float = 0.0
+    visual_density_index: float = 0.0
+    yolo_density: float = 0.0
+    smoothed_density: float = 0.0
+    occupancy_ratio: float = 0.0
+    crowd_status: str = "LOW"
+    flow_direction: str = "STATIONARY"
+    flow_speed: float = 0.0
+    flow_speed_unit: str = FLOW_SPEED_UNIT
+    congestion_index: float = 0.0
+    congestion_status: str = "LOW"
+    active_flow_vectors: int = 0
+    anomaly_score: float = 0.0
+    anomaly_status: str = ANOMALY_LEVEL_NORMAL
+    anomaly_reason: str = "Normal movement patterns"
+    stagnation_anomaly: float = 0.0
+    density_surge_anomaly: float = 0.0
+    deceleration_anomaly: float = 0.0
+    reversal_anomaly: float = 0.0
+    turbulence_anomaly: float = 0.0
+    reference_zone: str = DEFAULT_CAMERA_ZONE
     fps: float = 0.0
     inference_ms: float = 0.0
     processing_ms: float = 0.0
@@ -43,6 +76,13 @@ class Job:
     latest_frame_url: str | None = None
     processed_video_url: str | None = None
     results: list[dict] = field(default_factory=list)
+    _observed_track_ids: set[int] = field(default_factory=set, repr=False)
+    _track_history: dict[int, tuple[float, float, int, float]] = field(default_factory=dict, repr=False)
+    _flow_vx: float = field(default=0.0, repr=False)
+    _flow_vy: float = field(default=0.0, repr=False)
+    _high_congestion_counter: int = field(default=0, repr=False)
+    _anomaly_history: deque = field(default_factory=lambda: deque(maxlen=ANOMALY_ROLLING_WINDOW_FRAMES), repr=False)
+    _high_anomaly_counter: int = field(default=0, repr=False)
 
     def public(self) -> dict:
         data = asdict(self)
@@ -57,7 +97,15 @@ class Job:
         # GET /detection/results/{job_id} (which reads job.results
         # directly, not public()).
         data.pop("results", None)
+        data.pop("_observed_track_ids", None)
+        data.pop("_track_history", None)
+        data.pop("_flow_vx", None)
+        data.pop("_flow_vy", None)
+        data.pop("_high_congestion_counter", None)
+        data.pop("_anomaly_history", None)
+        data.pop("_high_anomaly_counter", None)
         return data
+
 
 
 class VideoProcessor:
@@ -184,6 +232,15 @@ class VideoProcessor:
                     job.input_size,
                 )
 
+                # Phase 4.2: Hybrid Image-Space Relative Crowd Density Calculation
+                density_result = calculate_frame_density(
+                    detections,
+                    frame,
+                    width,
+                    height,
+                    job.smoothed_density if raw_frame > job.frame_skip else None,
+                )
+
                 # Draw tracking results
                 for detection in detections:
                     x1, y1, x2, y2 = detection.bbox
@@ -227,6 +284,23 @@ class VideoProcessor:
                     if detection.track_id is not None
                 )
 
+                # Maintain unique track IDs across the job
+                for detection in detections:
+                    if detection.track_id is not None:
+                        job._observed_track_ids.add(detection.track_id)
+                job.unique_track_count = len(job._observed_track_ids)
+
+                # Track peak crowd observed across processed frames
+                if job.current_count > job.peak_crowd:
+                    job.peak_crowd = job.current_count
+
+                job.density_index = density_result.density_index
+                job.visual_density_index = density_result.visual_density_index
+                job.yolo_density = density_result.yolo_density
+                job.smoothed_density = density_result.smoothed_density_index
+                job.occupancy_ratio = density_result.occupancy_ratio
+                job.crowd_status = density_result.crowd_status
+
                 job.inference_ms = round(
                     inference_ms,
                     2,
@@ -257,10 +331,89 @@ class VideoProcessor:
                     3,
                 )
 
+                # Phase 5: Crowd flow and persistent congestion calculation
+                flow_result, job._track_history = calculate_crowd_flow_and_congestion(
+                    detections=detections,
+                    current_frame=raw_frame,
+                    current_timestamp=timestamp,
+                    track_history=job._track_history,
+                    smoothed_density=job.smoothed_density,
+                    previous_vx=job._flow_vx,
+                    previous_vy=job._flow_vy,
+                    previous_congestion_status=job.congestion_status,
+                    high_congestion_counter=job._high_congestion_counter,
+                )
+
+                job._flow_vx = flow_result.smoothed_vx
+                job._flow_vy = flow_result.smoothed_vy
+                job._high_congestion_counter = flow_result.high_congestion_counter
+
+                job.flow_direction = flow_result.flow_direction
+                job.flow_speed = flow_result.flow_speed
+                job.flow_speed_unit = flow_result.flow_speed_unit
+                job.congestion_index = flow_result.congestion_index
+                job.congestion_status = flow_result.congestion_status
+                job.active_flow_vectors = flow_result.active_flow_vectors
+
+                # Phase 6: Crowd behaviour anomaly intelligence calculation
+                anomaly_result = calculate_crowd_anomalies(
+                    smoothed_density=job.smoothed_density,
+                    flow_speed=job.flow_speed,
+                    smoothed_vx=job._flow_vx,
+                    smoothed_vy=job._flow_vy,
+                    stagnation_factor=flow_result.stagnation_factor,
+                    individual_vectors=flow_result.individual_vectors,
+                    history_buffer=job._anomaly_history,
+                    previous_anomaly_status=job.anomaly_status,
+                    high_anomaly_counter=job._high_anomaly_counter,
+                )
+
+                # Append current frame state to rolling history buffer (maxlen=50)
+                job._anomaly_history.append({
+                    "smoothed_density": job.smoothed_density,
+                    "flow_speed": job.flow_speed,
+                    "smoothed_vx": job._flow_vx,
+                    "smoothed_vy": job._flow_vy,
+                })
+                job._high_anomaly_counter = anomaly_result.high_anomaly_counter
+
+                job.anomaly_score = anomaly_result.anomaly_score
+                job.anomaly_status = anomaly_result.anomaly_status
+                job.anomaly_reason = anomaly_result.anomaly_reason
+                job.stagnation_anomaly = anomaly_result.stagnation_anomaly
+                job.density_surge_anomaly = anomaly_result.density_surge_anomaly
+                job.deceleration_anomaly = anomaly_result.deceleration_anomaly
+                job.reversal_anomaly = anomaly_result.reversal_anomaly
+                job.turbulence_anomaly = anomaly_result.turbulence_anomaly
+
                 result = {
                     "frame": raw_frame,
                     "timestamp": timestamp,
                     "person_count": len(detections),
+                    "current_count": len(detections),
+                    "active_track_count": job.active_track_count,
+                    "unique_track_count": job.unique_track_count,
+                    "peak_crowd": job.peak_crowd,
+                    "density_index": density_result.density_index,
+                    "visual_density_index": density_result.visual_density_index,
+                    "yolo_density": density_result.yolo_density,
+                    "smoothed_density": density_result.smoothed_density_index,
+                    "occupancy_ratio": density_result.occupancy_ratio,
+                    "crowd_status": density_result.crowd_status,
+                    "flow_direction": job.flow_direction,
+                    "flow_speed": job.flow_speed,
+                    "flow_speed_unit": job.flow_speed_unit,
+                    "congestion_index": job.congestion_index,
+                    "congestion_status": job.congestion_status,
+                    "active_flow_vectors": job.active_flow_vectors,
+                    "anomaly_score": job.anomaly_score,
+                    "anomaly_status": job.anomaly_status,
+                    "anomaly_reason": job.anomaly_reason,
+                    "stagnation_anomaly": job.stagnation_anomaly,
+                    "density_surge_anomaly": job.density_surge_anomaly,
+                    "deceleration_anomaly": job.deceleration_anomaly,
+                    "reversal_anomaly": job.reversal_anomaly,
+                    "turbulence_anomaly": job.turbulence_anomaly,
                     "detections": [
                         asdict(item)
                         for item in detections
@@ -299,6 +452,12 @@ class VideoProcessor:
                         "job_id": job.id,
                         "model": job.model_name,
                         "tracking": True,
+                        "density_analysis": True,
+                        "flow_analysis": True,
+                        "anomaly_intelligence": True,
+                        "unique_track_count": job.unique_track_count,
+                        "peak_crowd": job.peak_crowd,
+                        "reference_zone": job.reference_zone,
                         "frames": job.results,
                     },
                     indent=2,

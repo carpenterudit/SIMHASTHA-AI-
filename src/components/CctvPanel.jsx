@@ -13,7 +13,7 @@ const INPUT_SIZE_OPTIONS = [640, 960]
 // Must match the existing backend defaults (DEFAULT_MODEL / DEFAULT_CONFIDENCE / DEFAULT_INPUT_SIZE).
 const DEFAULT_SETTINGS = { model_name: 'yolo11n.pt', confidence: 0.4, input_size: 640 }
 
-export default function CctvPanel() {
+export default function CctvPanel({ onJobUpdate }) {
   const [upload, setUpload] = useState(null)
   const [job, setJob] = useState(null)
   const [error, setError] = useState('')
@@ -28,6 +28,7 @@ export default function CctvPanel() {
     if (!file) return
     setError('')
     setJob(null)
+    onJobUpdate?.(null)
     setBusy(true)
     try {
       setUpload(await uploadVideo(file))
@@ -53,11 +54,13 @@ export default function CctvPanel() {
         model_name: settings.model_name,
       })
       setJob(started)
+      onJobUpdate?.(started)
       clearInterval(pollRef.current)
       pollRef.current = setInterval(async () => {
         try {
           const status = await getDetectionStatus(started.id)
           setJob(status)
+          onJobUpdate?.(status)
           if (['completed', 'failed'].includes(status.status)) clearInterval(pollRef.current)
         } catch (cause) {
           setError(cause.message)
@@ -70,6 +73,7 @@ export default function CctvPanel() {
       setBusy(false)
     }
   }
+
 
   const imageUrl = mediaUrl(job?.latest_frame_url)
   const stateLabel = job ? job.status.replace('_', ' ').toUpperCase() : upload ? 'READY' : 'WAITING FOR VIDEO'
@@ -146,8 +150,12 @@ export default function CctvPanel() {
         </div>
         {job && (
           <div className="video-stats">
-            <div><small>CURRENT DETECTED PEOPLE</small><b>{job.current_count}</b></div>
+            <div><small>CURRENT CROWD</small><b>{job.current_count}</b></div>
+            <div><small>UNIQUE TRACKS</small><b>{typeof job.unique_track_count === 'number' ? job.unique_track_count : '—'}</b></div>
+            <div><small>PEAK CROWD</small><b>{typeof job.peak_crowd === 'number' ? job.peak_crowd : '—'}</b></div>
             <div><small>ACTIVE TRACKS</small><b>{typeof job.active_track_count === 'number' ? job.active_track_count : '—'}</b></div>
+            <div><small>CROWD DENSITY</small><b>{typeof job.density_index === 'number' ? `${(job.density_index * 100).toFixed(1)}%` : '—'}</b></div>
+            <div><small>CROWD STATUS</small><b><span className={`status-badge ${job.crowd_status?.toLowerCase() || 'low'}`}>{job.crowd_status || 'LOW'}</span></b></div>
             <div><small>FPS</small><b>{job.fps || '—'}</b></div>
             <div><small>INFERENCE</small><b>{job.inference_ms ? `${job.inference_ms} ms` : '—'}</b></div>
             <div><small>MODEL / DEVICE</small><b>{job.model_name?.replace('.pt', '').toUpperCase()} · {job.device?.toUpperCase()}</b></div>
