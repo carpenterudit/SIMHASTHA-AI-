@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 API_PREFIX = "/api"
@@ -118,6 +119,59 @@ PROVISIONAL_ANOMALY_THRESHOLDS = {
                                             # A >= 0.80: CRITICAL multi-anomaly convergence
 }
 
+# Phase 7: Spatial Zone Intelligence Configuration
+# Normalized coordinates: [x_min, y_min, x_max, y_max] where each value is in [0.0, 1.0].
+@dataclass(frozen=True)
+class ZoneDefinition:
+    zone_id: str
+    name: str
+    rect: tuple[float, float, float, float]
+    reference_capacity: int = 10
+
+
+DEFAULT_ZONE_CONFIG_KEY = "camera_07"
+
+CAMERA_ZONE_CONFIGS: dict[str, list[ZoneDefinition]] = {
+    "camera_07": [
+        ZoneDefinition(
+            zone_id="zone_a",
+            name="Zone A",
+            rect=(0.0, 0.0, 0.5, 0.5),
+            reference_capacity=10,
+        ),
+        ZoneDefinition(
+            zone_id="zone_b",
+            name="Zone B",
+            rect=(0.5, 0.0, 1.0, 0.5),
+            reference_capacity=10,
+        ),
+        ZoneDefinition(
+            zone_id="zone_c",
+            name="Zone C",
+            rect=(0.0, 0.5, 0.5, 1.0),
+            reference_capacity=10,
+        ),
+        ZoneDefinition(
+            zone_id="zone_d",
+            name="Zone D",
+            rect=(0.5, 0.5, 1.0, 1.0),
+            reference_capacity=10,
+        ),
+    ],
+}
+
+
+def get_camera_zones(camera_id: str | None = None) -> list[ZoneDefinition]:
+    """Retrieve the list of configured zones for a camera viewpoint.
+
+    If camera_id is None, empty, or unknown, safely falls back to DEFAULT_ZONE_CONFIG_KEY ('camera_07').
+    """
+    if camera_id and camera_id in CAMERA_ZONE_CONFIGS:
+        return CAMERA_ZONE_CONFIGS[camera_id]
+    return CAMERA_ZONE_CONFIGS[DEFAULT_ZONE_CONFIG_KEY]
+
+
 for directory in (UPLOADS_DIR, PROCESSED_DIR, RESULTS_DIR):
     directory.mkdir(parents=True, exist_ok=True)
+
 

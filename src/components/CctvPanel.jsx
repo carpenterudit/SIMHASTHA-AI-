@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { FileVideo, LoaderCircle, Play, Upload, Wifi } from 'lucide-react'
 import { getDetectionStatus, mediaUrl, startDetection, uploadVideo } from '../services/api'
+import { normalizeZones } from '../utils/zoneUtils'
 
 const formatBytes = size => `${(size / 1024 / 1024).toFixed(2)} MB`
 
@@ -19,6 +20,7 @@ export default function CctvPanel({ onJobUpdate }) {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [settings, setSettings] = useState(DEFAULT_SETTINGS)
+  const [showZones, setShowZones] = useState(true)
   const pollRef = useRef(null)
 
   useEffect(() => () => clearInterval(pollRef.current), [])
@@ -81,6 +83,8 @@ export default function CctvPanel({ onJobUpdate }) {
   // existing one-shot upload -> analyze flow, no mid-job reconfiguration).
   const canConfigure = upload && !job
 
+  const zoneList = normalizeZones(job?.zones)
+
   return (
     <section className="card cctv">
       <div className="panel-heading">
@@ -88,7 +92,17 @@ export default function CctvPanel({ onJobUpdate }) {
           <span className="eyebrow">LIVE CCTV MONITORING</span>
           <h3>Ramghat South Approach</h3>
         </div>
-        <span className="camera-live"><i/> {job ? 'AI ANALYSIS' : 'NO VIDEO'}</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <button
+            type="button"
+            className={`zone-toggle-btn ${showZones ? 'active' : ''}`}
+            onClick={() => setShowZones(prev => !prev)}
+            title="Toggle spatial quadrant overlay"
+          >
+            {showZones ? 'ZONES ON' : 'ZONES OFF'}
+          </button>
+          <span className="camera-live"><i/> {job ? 'AI ANALYSIS' : 'NO VIDEO'}</span>
+        </div>
       </div>
       <div className="upload-strip">
         <label className="upload-button">
@@ -161,6 +175,44 @@ export default function CctvPanel({ onJobUpdate }) {
             <div><small>MODEL / DEVICE</small><b>{job.model_name?.replace('.pt', '').toUpperCase()} · {job.device?.toUpperCase()}</b></div>
             <div><small>CONFIDENCE</small><b>{typeof job.confidence === 'number' ? job.confidence.toFixed(2) : '—'}</b></div>
             <div><small>INPUT SIZE</small><b>{job.input_size ? `${job.input_size}px` : '—'}</b></div>
+          </div>
+        )}
+        {showZones && zoneList.length > 0 && (
+          <div className="zone-overlay-layer">
+            {zoneList.map(z => {
+              const rect = z.rect || [0, 0, 1, 1]
+              const [x1, y1, x2, y2] = rect
+              const densityPct = typeof z.smoothed_density === 'number'
+                ? (z.smoothed_density * 100).toFixed(0)
+                : typeof z.density_index === 'number'
+                ? (z.density_index * 100).toFixed(0)
+                : '0'
+              const riskClass = (z.risk || 'NORMAL').toLowerCase()
+
+              return (
+                <div
+                  key={z.zone_id}
+                  className={`zone-quadrant ${riskClass} ${z.zone_id}`}
+                  style={{
+                    left: `${x1 * 100}%`,
+                    top: `${y1 * 100}%`,
+                    width: `${(x2 - x1) * 100}%`,
+                    height: `${(y2 - y1) * 100}%`,
+                  }}
+                >
+                  <div className="zone-hud">
+                    <div className="zone-hud-header">
+                      <span className="zone-hud-title">{z.name || z.zone_id.toUpperCase()}</span>
+                      <span className={`status-badge ${riskClass}`}>{z.risk || 'NORMAL'}</span>
+                    </div>
+                    <div className="zone-hud-stats">
+                      <span><b>{z.current_count ?? 0}</b> head</span>
+                      <span><b>{densityPct}%</b> dens</span>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
           </div>
         )}
         <div className="analysis-status">

@@ -99,7 +99,9 @@ async def detection_results(job_id: str):
         "reversal_anomaly": job.reversal_anomaly,
         "turbulence_anomaly": job.turbulence_anomaly,
         "reference_zone": job.reference_zone,
+        "zones": job.zones,
         "frames": job.results,
         "processed_video_url": job.processed_video_url,
     }
+
 

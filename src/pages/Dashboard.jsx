@@ -11,6 +11,7 @@ import EmergencyWidget from '../components/EmergencyWidget'
 import DroneFleet from '../components/DroneFleet'
 import AlertPanel from '../components/AlertPanel'
 import { dashboardData } from '../data/mockData'
+import { normalizeZones } from '../utils/zoneUtils'
 
 export default function Dashboard() {
   const [menu, setMenu] = useState(false)
@@ -89,34 +90,9 @@ export default function Dashboard() {
     return item
   })
 
-  // Dynamic Zones: Update Ramghat with real Camera-07 AI metrics
-  const zoneItems = dashboardData.zones.map(z => {
-    if (z.zone === 'Ramghat' && isLive) {
-      const densityPercent =
-        typeof activeJob.density_index === 'number'
-          ? `${Math.round(activeJob.density_index * 100)}%`
-          : '0%'
-      const status = activeJob.crowd_status || 'LOW'
-      const risk =
-        status === 'CRITICAL'
-          ? 'Critical'
-          : status === 'HIGH'
-          ? 'High'
-          : status === 'MEDIUM'
-          ? 'Moderate'
-          : 'Normal'
+  // Phase 7: Real Camera-07 4-Quadrant Zone Intelligence
+  const liveZones = normalizeZones(activeJob?.zones)
 
-      return {
-        ...z,
-        people: `${activeJob.current_count} (Peak: ${activeJob.peak_crowd ?? activeJob.current_count})`,
-        density: densityPercent,
-        flow: activeJob.flow_direction || z.flow,
-        risk,
-      }
-    }
-
-    return z
-  })
 
   // Crowd chart: Real frame readings when live, falling back to 60-min baseline
   const chartData =
@@ -181,7 +157,7 @@ export default function Dashboard() {
               anomalyScore={activeJob?.anomaly_score ?? 0}
               anomalyReason={activeJob?.anomaly_reason || 'Normal movement patterns'}
             />
-            <ZoneTable zones={zoneItems} />
+            <ZoneTable zones={liveZones} isLive={isLive} />
           </div>
           <div className="side-stack">
             <IncidentPanel incidents={dashboardData.incidents} />

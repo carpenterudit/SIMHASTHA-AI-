@@ -21,12 +21,16 @@ from config import (
     FLOW_SPEED_UNIT,
     PROCESSED_DIR,
     RESULTS_DIR,
+    ZoneDefinition,
+    get_camera_zones,
 )
 from services.crowd_service import (
     calculate_crowd_anomalies,
     calculate_crowd_flow_and_congestion,
     calculate_frame_density,
+    calculate_zone_metrics,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +80,7 @@ class Job:
     latest_frame_url: str | None = None
     processed_video_url: str | None = None
     results: list[dict] = field(default_factory=list)
+    zones: list[dict] = field(default_factory=list)
     _observed_track_ids: set[int] = field(default_factory=set, repr=False)
     _track_history: dict[int, tuple[float, float, int, float]] = field(default_factory=dict, repr=False)
     _flow_vx: float = field(default=0.0, repr=False)
@@ -83,28 +88,68 @@ class Job:
     _high_congestion_counter: int = field(default=0, repr=False)
     _anomaly_history: deque = field(default_factory=lambda: deque(maxlen=ANOMALY_ROLLING_WINDOW_FRAMES), repr=False)
     _high_anomaly_counter: int = field(default=0, repr=False)
+    _zones: list[ZoneDefinition] = field(default_factory=list, repr=False)
+    _zone_density_state: dict[str, float] = field(default_factory=dict, repr=False)
+    _zone_track_history: dict[int, tuple[float, float, int, float]] = field(default_factory=dict, repr=False)
+    _zone_velocity_state: dict[str, tuple[float, float]] = field(default_factory=dict, repr=False)
+    _zone_congestion_state: dict[str, tuple[str, int]] = field(default_factory=dict, repr=False)
+    _zone_anomaly_history: dict[str, deque] = field(default_factory=dict, repr=False)
+    _zone_anomaly_counter: dict[str, int] = field(default_factory=dict, repr=False)
 
     def public(self) -> dict:
-        data = asdict(self)
-        data["source"] = self.source.name
-        data["progress"] = (
-            round((self.frame / self.total_frames) * 100, 1)
-            if self.total_frames
-            else 0
-        )
-        # Frequent status polling doesn't need the full, ever-growing
-        # per-frame history — that's served in full by
-        # GET /detection/results/{job_id} (which reads job.results
-        # directly, not public()).
-        data.pop("results", None)
-        data.pop("_observed_track_ids", None)
-        data.pop("_track_history", None)
-        data.pop("_flow_vx", None)
-        data.pop("_flow_vy", None)
-        data.pop("_high_congestion_counter", None)
-        data.pop("_anomaly_history", None)
-        data.pop("_high_anomaly_counter", None)
-        return data
+        return {
+            "id": self.id,
+            "job_id": self.id,
+            "source": self.source.name,
+            "confidence": self.confidence,
+            "input_size": self.input_size,
+            "frame_skip": self.frame_skip,
+            "model_name": self.model_name,
+            "status": self.status,
+            "error": self.error,
+            "frame": self.frame,
+            "total_frames": self.total_frames,
+            "progress": (
+                round((self.frame / self.total_frames) * 100, 1)
+                if self.total_frames
+                else 0
+            ),
+            "current_count": self.current_count,
+            "active_track_count": self.active_track_count,
+            "unique_track_count": self.unique_track_count,
+            "peak_crowd": self.peak_crowd,
+            "density_index": self.density_index,
+            "visual_density_index": self.visual_density_index,
+            "yolo_density": self.yolo_density,
+            "smoothed_density": self.smoothed_density,
+            "occupancy_ratio": self.occupancy_ratio,
+            "crowd_status": self.crowd_status,
+            "flow_direction": self.flow_direction,
+            "flow_speed": self.flow_speed,
+            "flow_speed_unit": self.flow_speed_unit,
+            "congestion_index": self.congestion_index,
+            "congestion_status": self.congestion_status,
+            "active_flow_vectors": self.active_flow_vectors,
+            "anomaly_score": self.anomaly_score,
+            "anomaly_status": self.anomaly_status,
+            "anomaly_reason": self.anomaly_reason,
+            "stagnation_anomaly": self.stagnation_anomaly,
+            "density_surge_anomaly": self.density_surge_anomaly,
+            "deceleration_anomaly": self.deceleration_anomaly,
+            "reversal_anomaly": self.reversal_anomaly,
+            "turbulence_anomaly": self.turbulence_anomaly,
+            "reference_zone": self.reference_zone,
+            "fps": self.fps,
+            "inference_ms": self.inference_ms,
+            "processing_ms": self.processing_ms,
+            "device": self.device,
+            "gpu_name": self.gpu_name,
+            "latest_frame_url": self.latest_frame_url,
+            "processed_video_url": self.processed_video_url,
+            "zones": list(self.zones),
+        }
+
+
 
 
 
@@ -129,9 +174,34 @@ class VideoProcessor:
             frame_skip,
             model_name,
         )
+        default_zones = get_camera_zones("camera_07")
+        job.zones = [
+            {
+                "zone_id": z.zone_id,
+                "name": z.name,
+                "rect": [round(float(c), 4) for c in z.rect],
+                "capacity": z.reference_capacity,
+                "current_count": 0,
+                "active_track_count": 0,
+                "density_index": 0.0,
+                "smoothed_density": 0.0,
+                "crowd_status": "LOW",
+                "flow_direction": "STATIONARY",
+                "flow_speed": 0.0,
+                "flow_speed_unit": FLOW_SPEED_UNIT,
+                "congestion_index": 0.0,
+                "congestion_status": "LOW",
+                "anomaly_score": 0.0,
+                "anomaly_status": ANOMALY_LEVEL_NORMAL,
+                "anomaly_reason": "Normal movement patterns",
+                "risk": "NORMAL",
+            }
+            for z in default_zones
+        ]
 
         with self._lock:
             self.jobs[job.id] = job
+
 
         threading.Thread(
             target=self._run,
@@ -208,6 +278,11 @@ class VideoProcessor:
                 )
 
             job.status = "processing"
+            job._zones = get_camera_zones("camera_07")
+            job._zone_anomaly_history = {
+                z.zone_id: deque(maxlen=ANOMALY_ROLLING_WINDOW_FRAMES)
+                for z in job._zones
+            }
 
             last_time = time.perf_counter()
             raw_frame = 0
@@ -386,6 +461,23 @@ class VideoProcessor:
                 job.reversal_anomaly = anomaly_result.reversal_anomaly
                 job.turbulence_anomaly = anomaly_result.turbulence_anomaly
 
+                # Phase 7 Step 2: Zone intelligence metrics calculation
+                zone_results, job._zone_track_history = calculate_zone_metrics(
+                    detections=detections,
+                    frame_width=width,
+                    frame_height=height,
+                    current_frame=raw_frame,
+                    current_timestamp=timestamp,
+                    zones=job._zones,
+                    zone_density_state=job._zone_density_state,
+                    zone_track_history=job._zone_track_history,
+                    zone_velocity_state=job._zone_velocity_state,
+                    zone_congestion_state=job._zone_congestion_state,
+                    zone_anomaly_history=job._zone_anomaly_history,
+                    zone_anomaly_counter=job._zone_anomaly_counter,
+                )
+                job.zones = [zr.to_dict() for zr in zone_results]
+
                 result = {
                     "frame": raw_frame,
                     "timestamp": timestamp,
@@ -414,11 +506,13 @@ class VideoProcessor:
                     "deceleration_anomaly": job.deceleration_anomaly,
                     "reversal_anomaly": job.reversal_anomaly,
                     "turbulence_anomaly": job.turbulence_anomaly,
+                    "zones": job.zones,
                     "detections": [
                         asdict(item)
                         for item in detections
                     ],
                 }
+
 
                 job.results.append(result)
 
@@ -455,9 +549,11 @@ class VideoProcessor:
                         "density_analysis": True,
                         "flow_analysis": True,
                         "anomaly_intelligence": True,
+                        "zone_intelligence": True,
                         "unique_track_count": job.unique_track_count,
                         "peak_crowd": job.peak_crowd,
                         "reference_zone": job.reference_zone,
+                        "zones": job.zones,
                         "frames": job.results,
                     },
                     indent=2,
